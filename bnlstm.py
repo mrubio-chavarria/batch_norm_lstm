@@ -1,5 +1,5 @@
-#!/home/mario/anaconda3/envs/project2_venv/bin python
 
+import os
 import torch
 from torch import nn
 from torch.nn import init
@@ -32,7 +32,7 @@ class BatchNormModule(nn.Module):
         self.eps = eps
         self.momentum = momentum
         self.affine = affine
-        self.zero_bias = zero_bias
+        self.zero_bias = zero_bias 
 
         if self.affine:
             self.weight = nn.Parameter(torch.FloatTensor(num_features))
@@ -114,7 +114,7 @@ class LSTMlayer(nn.Module):
     The class to stack the LSTM cells in a single layer.
     """
     # Methods
-    def __init__(self, input_size, hidden_size, layer_index, reference=None, bidirectional=False, batch_norm=False, max_length=1000):
+    def __init__(self, input_size, hidden_size, layer_index, reference=None, bidirectional=False, batch_norm=False, gamma=0.1, max_length=1000):
         """
         DESCRIPTION:
         Class constructor.
@@ -126,6 +126,7 @@ class LSTMlayer(nn.Module):
         be bidirectional or not.
         :param batch_norm: [bool] flag to indicate if there should be recurrent batch
         normalisation.
+        :param gamma: [float] gamma value to initialse the batch norms.
         """
         super().__init__()
         self.input_size = input_size
@@ -133,58 +134,57 @@ class LSTMlayer(nn.Module):
         self.layer_index = layer_index
         self.bidirectional = bidirectional
         self.batch_norm = batch_norm
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.device = device  # Store for future calculations
         # Define the cell
         self.cell = bnlstm_cell if batch_norm else lstm_cell
         if batch_norm:
-            # Batch normalisation parameters
-            self.bn_ih = BatchNormModule(4 * hidden_size, max_length=max_length, zero_bias=True)
-            self.bn_hh = BatchNormModule(4 * hidden_size, max_length=max_length, zero_bias=True)
-            self.bn_c = BatchNormModule(hidden_size, max_length=max_length, zero_bias=True)
+            # Create the batch norms
+            bn_ih = BatchNormModule(4 * hidden_size, max_length=max_length, zero_bias=True)
+            bn_hh = BatchNormModule(4 * hidden_size, max_length=max_length, zero_bias=True)
+            bn_c = BatchNormModule(hidden_size, max_length=max_length, zero_bias=True)
             # Initialise the parameters
-            self.bn_ih.reset_parameters()
-            self.bn_hh.reset_parameters()
-            self.bn_c.reset_parameters()
-            self.bn_ih.bias.data.fill_(0)
-            self.bn_hh.bias.data.fill_(0)
-            self.bn_ih.weight.data.fill_(0.1)
-            self.bn_hh.weight.data.fill_(0.1)
-            self.bn_c.weight.data.fill_(0.1)
+            bn_ih.reset_parameters()
+            bn_hh.reset_parameters()
+            bn_c.reset_parameters()
+            bn_ih.bias.data.fill_(0)
+            bn_hh.bias.data.fill_(0)
+            bn_ih.weight.data.fill_(gamma)
+            bn_hh.weight.data.fill_(gamma)
+            bn_c.weight.data.fill_(gamma)
+            # Register the batch norms
+            self.batch_norms = nn.ModuleList([bn_hh, bn_ih, bn_c])
 
-        # Import or create the matrices
+        # Import or create the weights and biases
         if reference is None:
             # Create
             dims = [4 * hidden_size, input_size]
-            self.weight_ih = self.initialise_matrix(dims, method='orthogonal')
+            weight_ih = self.initialise_matrix(dims, method='orthogonal')
             dims = [4 * hidden_size, hidden_size]
-            self.weight_hh = self.initialise_matrix(dims, method='identity')
+            weight_hh = self.initialise_matrix(dims, method='identity')
             dims = [4 * hidden_size]
-            self.bias = self.initialise_matrix(dims, method='zeros')
+            bias = torch.unsqueeze(self.initialise_matrix(dims, method='zeros'), 1)
             if self.bidirectional:
                 dims = [4 * hidden_size, input_size]
-                self.weight_ih_reverse = self.initialise_matrix(dims, method='orthogonal')
+                weight_ih_reverse = self.initialise_matrix(dims, method='orthogonal')
                 dims = [4 * hidden_size, hidden_size]
-                self.weight_hh_reverse = self.initialise_matrix(dims, method='identity')
+                weight_hh_reverse = self.initialise_matrix(dims, method='identity')
                 dims = [4 * hidden_size]
-                self.bias_reverse = self.initialise_matrix(dims, method='zeros')
+                bias_reverse = torch.unsqueeze(self.initialise_matrix(dims, method='zeros'), 1)
         else:
             # Import
-            setattr(self, f'weight_ih', getattr(reference, f'weight_ih_l{layer_index}'))
-            setattr(self, f'weight_hh', getattr(reference, f'weight_hh_l{layer_index}'))
-            setattr(self, f'bias', getattr(reference, f'bias_ih_l{layer_index}') + getattr(reference, f'bias_hh_l{layer_index}'))
+            weight_ih = getattr(reference, f'weight_ih_l{layer_index}')
+            weight_hh = getattr(reference, f'weight_hh_l{layer_index}')
+            bias = torch.unsqueeze(getattr(reference, f'bias_ih_l{layer_index}') + getattr(reference, f'bias_hh_l{layer_index}'), 1)
             if self.bidirectional:
-                setattr(self, f'weight_ih_reverse', getattr(reference, f'weight_ih_l{layer_index}_reverse'))
-                setattr(self, f'weight_hh_reverse', getattr(reference, f'weight_hh_l{layer_index}_reverse'))
-                setattr(self, f'bias_reverse', getattr(reference, f'bias_ih_l{layer_index}_reverse') + getattr(reference, f'bias_hh_l{layer_index}_reverse'))
-        # Send weights to device and format biases dimensions
-        self.weight_ih = self.weight_ih.to(device)
-        self.weight_hh = self.weight_hh.to(device)
-        self.bias = nn.Parameter(torch.unsqueeze(self.bias.to(device), 1))
-        if self.bidirectional:
-            self.weight_ih_reverse = self.weight_ih_reverse.to(device)
-            self.weight_hh_reverse = self.weight_hh_reverse.to(device)
-            self.bias_reverse = nn.Parameter(self.bias_reverse.to(device).view(-1, 1))
+                weight_ih_reverse = getattr(reference, f'weight_ih_l{layer_index}_reverse')
+                weight_hh_reverse = getattr(reference, f'weight_hh_l{layer_index}_reverse')
+                bias_reverse = torch.unsqueeze(getattr(reference, f'bias_ih_l{layer_index}_reverse') + getattr(reference, f'bias_hh_l{layer_index}_reverse'), 1)
+        # Register weights and biases
+        self.weight_ih = nn.Parameter(weight_ih)
+        self.weight_hh = nn.Parameter(weight_hh)
+        self.weight_ih_reverse = nn.Parameter(weight_ih_reverse)
+        self.weight_hh_reverse = nn.Parameter(weight_hh_reverse)
+        self.bias = nn.Parameter(bias)
+        self.bias_reverse = nn.Parameter(bias_reverse)
 
     def forward(self, sequence, initial_states=None):
         """
@@ -202,15 +202,19 @@ class LSTMlayer(nn.Module):
         """
         # Initialise hidden and cell states
         if initial_states is None:
-            h_0 = torch.zeros(self.hidden_size, sequence.shape[1]).to(self.device)
-            c_0 = torch.zeros(self.hidden_size, sequence.shape[1]).to(self.device)
+            h_0 = torch.zeros(self.hidden_size, sequence.shape[1])
+            c_0 = torch.zeros(self.hidden_size, sequence.shape[1])
         else:
             h_0, c_0 = initial_states
         # Forward pass
         h_f, c_f = self.sequence_pass(sequence, h_0, c_0, reverse=False)
+        h_f = h_f
+        c_f = c_f
         if self.bidirectional:
             # Backward pass
             h_b, c_b = self.sequence_pass(sequence, h_0, c_0, reverse=True)
+            h_b = h_b
+            c_b = c_b
             # Concat both
             h = torch.cat((h_f, h_b), dim=2)
             c = torch.cat((c_f, c_b), dim=2)
@@ -236,11 +240,12 @@ class LSTMlayer(nn.Module):
         """
         hs = [h_0]
         cs = [c_0]
-        batch_norms = [self.bn_hh, self.bn_ih, self.bn_c] if self.batch_norm else []
+        batch_norms = self.batch_norms if self.batch_norm else []
         if reverse:
             for i in range(sequence.shape[0]-1, -1, -1):
                 time = -i + (sequence.shape[0]-1)
-                h_t, c_t = self.cell(sequence[i].permute(1, 0), hs[-1], cs[-1],
+                h_t, c_t = self.cell(sequence[i].permute(1, 0), 
+                                    hs[-1], cs[-1],
                                     self.weight_ih_reverse, self.weight_hh_reverse,
                                     self.bias_reverse,
                                     # For the reverse case we use the same BN, just 
@@ -254,8 +259,10 @@ class LSTMlayer(nn.Module):
             for i in range(sequence.shape[0]):
                 time = i
                 # Define the batch normalisations to use
-                h_t, c_t = self.cell(sequence[i, :, :].permute(1, 0), hs[-1], cs[-1], 
-                                    self.weight_ih, self.weight_hh, self.bias,
+                h_t, c_t = self.cell(sequence[i, :, :].permute(1, 0), 
+                                    hs[-1], cs[-1], 
+                                    self.weight_ih, self.weight_hh,
+                                    self.bias,
                                     batch_norms, time)
                 hs.append(h_t)
                 cs.append(c_t)
@@ -301,11 +308,12 @@ class LSTM(nn.Module):
     Final LSTM module built on the previous ones.
     """
     # Methods
-    def __init__(self, input_size, hidden_size, num_layers, batch_first=False, reference=None, bidirectional=False, batch_norm=False):
+    def __init__(self, input_size, hidden_size, batch_size, num_layers, batch_first=False, reference=None, bidirectional=False, batch_norm=False, gamma=0.1):
         """
         Class constructor.
         :param input_size: [int] dimensionality of every item in the input sequence.
         :param hidden_size: [int] dimensionality of every sequence item in the hidden space.
+        :param batch_size: [int] number of samples in the batch.
         :param batch_first: [bool] if True, the input should be
         [batch_size, sequence_length, n_features], otherwise 
         [sequence_length, batch_size, n_features]
@@ -315,20 +323,27 @@ class LSTM(nn.Module):
         be bidirectional or not.
         :param batch_norm: [bool] flag to indicate if there should be recurrent batch
         normalisation.
+        :param gamma: [float] gamma value to initialse the batch norms.
         """
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
+        self.batch_size = batch_size
         self.num_layers = num_layers
         self.batch_first = batch_first
         self.n_directions = 2 if bidirectional else 1
-        # Create the layers
+        # Initial cell states
+        self.effective_batch_size = int(self.batch_size / len(os.environ['CUDA_VISIBLE_DEVICES'].split(',')))
+        self.register_buffer('h_0', torch.zeros(self.hidden_size, self.effective_batch_size))
+        self.register_buffer('c_0', torch.zeros(self.hidden_size, self.effective_batch_size))
+        # Create layers
         self.layers = []
         for i in range(self.num_layers):
             if i == 0:
-                self.layers.append(LSTMlayer(input_size, hidden_size, i, reference, bidirectional, batch_norm))
+                self.layers.append(LSTMlayer(input_size, hidden_size, i, reference, bidirectional, batch_norm, gamma))
             else:
-                self.layers.append(LSTMlayer(self.n_directions * hidden_size, hidden_size, i, reference, bidirectional, batch_norm))
+                self.layers.append(LSTMlayer(self.n_directions * hidden_size, hidden_size, i, reference, bidirectional, batch_norm, gamma))
+        self.layers = nn.ModuleList(self.layers)
     
     def forward(self, sequence):
         """
@@ -337,6 +352,8 @@ class LSTM(nn.Module):
         :param sequence: [torch.Tensor] sequence to feed the network. Dimensionality:
         [sequence_length, batch_size, input_size] or [batch_size, sequence_length, input_size]
         if bach_first == True.
+        :param initial_states: [tuple] (h_0, c_0), the initial hidden and cell states.
+        Both with the dimensionality: [directions * number_of_layers, batch_size, hidden_size].
         :return: the of torch.nn.LSTM. [torch.Tensor] the hidden state of the last layer,
         dimensionality: [sequence_length, batch_size, number_of_directions*hidden_size] or 
         [batch_size, sequence_length, number_of_directions*hidden_size] if batch_first == True.
@@ -346,11 +363,12 @@ class LSTM(nn.Module):
         # Correct for the batch_first
         if self.batch_first:
             sequence = sequence.permute(1, 0, 2)
+        # Set initial parameters
         h_n = []
         c_n = []
         output = sequence
         for layer in self.layers:
-            output, (h_t, c_t) = layer(output)
+            output, (h_t, c_t) = layer(output, (self.h_0, self.c_0))
             h_n.append(h_t)
             c_n.append(c_t)
         h_n = torch.stack(h_n, dim=0).view(self.n_directions * self.num_layers, -1, self.hidden_size)
@@ -390,7 +408,7 @@ def lstm_cell(x, h_t_1, c_t_1, weight_ih, weight_hh, bias, *args):
     return h_t, c_t
 
 
-def bnlstm_cell(x, h_t_1, c_t_1, weight_ih, weight_hh, bias, batch_norms, time):
+def bnlstm_cell(x, h_t_1, c_t_1, weight_ih, weight_hh, bias, batch_norms, time, *args):
     """
     DESCRIPTION:
     Function that represents the LSTM cell with batch normalisation. Adapted
@@ -421,8 +439,9 @@ def bnlstm_cell(x, h_t_1, c_t_1, weight_ih, weight_hh, bias, batch_norms, time):
     w_hh_by_h_t_1 = w_hh_by_h_t_1.permute(1, 0)
     w_ih_by_x = weight_ih @ x
     w_ih_by_x = w_ih_by_x.permute(1, 0)
-    ifgo = batch_norms[0](w_hh_by_h_t_1, time).permute(1, 0) + \
-            batch_norms[1](w_ih_by_x, time).permute(1, 0) + bias
+    term1 = batch_norms[0](w_hh_by_h_t_1, time).permute(1, 0)
+    term2 = batch_norms[1](w_ih_by_x, time).permute(1, 0)
+    ifgo =  term1 + term2 + bias
     i, f, g, o = torch.split(ifgo, int(weight_ih.shape[0] / 4), dim=0)
     c_t = torch.sigmoid(f) * c_t_1 + torch.sigmoid(i) * torch.tanh(g)
     h_t = torch.sigmoid(o) * torch.tanh(batch_norms[2](c_t.permute(1, 0), time)).permute(1, 0)
@@ -430,4 +449,5 @@ def bnlstm_cell(x, h_t_1, c_t_1, weight_ih, weight_hh, bias, batch_norms, time):
 
 
     
+
 
